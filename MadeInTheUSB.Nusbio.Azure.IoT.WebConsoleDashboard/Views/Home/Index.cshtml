@@ -1,0 +1,308 @@
+﻿@{
+    ViewBag.Title = "Home Page";
+}
+
+<br />
+<button id="butRefresh" onclick="nusbio.getData('current');">Refresh</button> 
+<button id="butClearData" onclick="nusbio.getData('current', nusbio.CLEAR_DATA);">clear</button> 
+Last Max Samples: <input id="lastMaxSample" value="64" size="4" />
+<br />
+
+<button id="butLastHour" onclick="nusbio.getData('lastHour');">Last Hour</button>
+<button id="butLast10Minutes" onclick="nusbio.getData('last10Minutes');">Last 10 minutes</button>
+<button id="butLast24Hours" onclick="nusbio.getData('last24Hours');">Last 24 hours</button>
+
+<div id="out"></div>
+
+<p>
+    Temperatures:
+    <div style="width: 100%">
+        <canvas id="canvasTemp" height="300" width="1200"></canvas>
+    </div>
+</p>
+
+<p>
+    Motions:
+    <div style="width: 100%">
+        <canvas id="canvasMotion" height="300" width="1200"></canvas>
+    </div>
+</p>
+
+<script>
+
+    var tempChart, motionChart;
+    
+    // http://www.chartjs.org/docs/#getting-started-include-chart.js
+    function showGraph(tempChartData, motionChartData) {
+
+        // Chart.defaults.global.responsive = true;
+
+        if(tempChartData.datasets[0].data.length > 0) {
+
+            var ctx = document.getElementById("canvasTemp").getContext("2d");
+            tempChart = new Chart(ctx).Line(tempChartData, { responsive: false });
+        }
+
+        if(motionChartData.datasets[0].data.length > 0) {
+
+            var ctx = document.getElementById("canvasMotion").getContext("2d");
+            motionChart = new Chart(ctx).Bar(motionChartData, { responsive: false });
+        }
+    }
+
+    var HOST      = "localhost";
+    var HOST_PORT = 51789;
+    var nusbio    = null;
+
+    function getNewEmptyLineChartDataSet() {
+        return {
+            labels: [],
+            datasets: [
+                {
+                    label               : "My First dataset",
+                    fillColor           : "rgba(220,220,220,0.2)",
+                    strokeColor         : "rgba(220,220,220,1)",
+                    pointColor          : "rgba(220,220,220,1)",
+                    pointStrokeColor    : "#fff",
+                    pointHighlightFill  : "#fff",
+                    pointHighlightStroke: "rgba(220,220,220,1)",
+                    data                : []
+                }
+                //,{
+                //    label               : "My Second dataset",
+                //    fillColor           : "rgba(151,187,205,0.2)",
+                //    strokeColor         : "rgba(151,187,205,1)",
+                //    pointColor          : "rgba(151,187,205,1)",
+                //    pointStrokeColor    : "#fff",
+                //    pointHighlightFill  : "#fff",
+                //    pointHighlightStroke: "rgba(151,187,205,1)",
+                //    data                : []
+                //}
+            ]
+        };
+    }
+
+    function getNewEmptyDataSet() {
+        return {
+            labels: [],
+            datasets: [
+                {
+                    fillColor      : "rgba(220,220,220,0.5)",
+                    strokeColor    : "rgba(220,220,220,0.8)",
+                    highlightFill  : "rgba(220,220,220,0.75)",
+                    highlightStroke: "rgba(220,220,220,1)",
+                    data           : []
+                }
+            ]
+        };
+    }
+
+    function UpdateUIWithData(r) {
+
+        var dp = r.Data;
+        var ssss = sys.getType(dp);
+        // Each property in finalDP is a monitored device pointing to a array of value
+        var finalDp = {};
+
+        if (!sys.isArray(dp)) {
+            nusbio.showError("r.Data is not an array r:"+JSON.stringify(r));
+        }
+
+        dp.forEach(function (o) {
+            if (sys.isUndefined(finalDp[o.DeviceId])) {
+                finalDp[o.DeviceId] = [];
+            }
+            var finalO = { EnqueuedTime: o.EnqueuedTime };
+            Object.keys(o.Properties).forEach(function (prop) {
+                finalO[prop] = o.Properties[prop];
+            });
+            finalDp[o.DeviceId].push(finalO);
+        });
+
+        var tempChartData = getNewEmptyLineChartDataSet();
+        var tempData      = finalDp["pcBasementTemperatureSensor"];
+        if (sys.isArray(tempData)) { // if it is not an array, we did not receive any data, happens because some issue with Azure IoTHub
+            tempData.forEach(function (t) {
+                tempChartData.labels.push(moment(t.EnqueuedTime).format('hh:mm:ss'));
+                tempChartData.datasets[0].data.push(t.Temperature);
+            });
+        }
+
+        var motionChartData = getNewEmptyDataSet();
+        tempData            = finalDp["pcBasementMotionSensor"];
+        if (sys.isArray(tempData)) { // if it is not an array, we did not receive any data, happens because some issue with Azure IoTHub
+            tempData.forEach(function (t) {
+                motionChartData.labels.push(moment(t.MotionDetectedUtcTimeStamp).format('hh:mm:ss'));
+                motionChartData.datasets[0].data.push(100);
+            });
+        }
+
+        showGraph(tempChartData, motionChartData);
+    }
+
+    function Nusbio__callBack(r) {
+
+        //nusbio.__trace(JSON.stringify(r));
+        if (r.Succeeded) {
+
+            if (r.Url.match("\/.*GetData.*pcBasementTemperatureSensor.*","g")) {
+                UpdateUIWithData(r); // Update graph for the temp sensor and call getData for motion sensor
+                this.busy(false);
+                nusbio.__getData(nusbio.MOTION_SENSOR_DEVICE_ID, "current", r.Url.match(".*action=clearData.*","g"));
+            }
+            else if (r.Url.match("\/.*GetData.*","g")) {
+                UpdateUIWithData(r); // Update graph for the motion sensor
+                this.busy(false);
+            }
+            else if (r.Url.match(/\/gpio\/all\/animate/g) || r.Url.match(/\/gpio\/all\/off/g)) { // "/led/all/animate" or "/led/all/off"
+            }
+            else if (r.Url.match(/\/nusbio\/state/g)) { // /nusbio/state
+            }
+        }
+    }
+
+    function NusbioClass(host, hostPort, getCallBack) {
+
+        this._traceOn = true;
+        var $this     = this;
+        this.CLEAR_DATA = true;
+
+        this.TEMP_SENSOR_DEVICE_ID   = "pcBasementTemperatureSensor";
+        this.MOTION_SENSOR_DEVICE_ID = "pcBasementMotionSensor";
+
+        this.__init__ = function () {
+
+            if (!getCallBack)
+                throw "parameter getCallBack is required";
+            this._baseUrl       = this.__stringFormat("http://{0}:{1}/api", host, hostPort);
+            this.__userCallBack = getCallBack;
+            this.StartTime      = moment();
+        }
+        this.disableRefreshButton = function() {
+
+            $("#butRefresh")      .prop("disabled", true);
+        } 
+        this.busy = function(status) {
+
+            $("#butRefresh")      .prop("disabled", status);
+            $("#butLastHour")     .prop("disabled", status);
+            $("#butLast10Minutes").prop("disabled", status);
+            $("#butLast24Hours")  .prop("disabled", status);
+        }
+        this.__get = function (url, data, successFunction) {
+
+            try {
+                this.__trace(this.__stringFormat("GET url:{0}, data:{1}", url, data));
+                jQuery.get(url, data, successFunction);
+            } 
+            catch (ex) {
+                this.__trace(this.__stringFormat("Cannot contat Nusbio web server at {0}, error:{1}", url, ex));
+                throw ex;
+            }
+        }
+        this.__callNusbioRestApi = function (url, callBack) {
+
+            this.setUserStatus("Busy...");
+
+            if (typeof(callBack) === 'undefined')
+                callBack = this.__getCallBack;
+
+            var url = this._baseUrl + url;
+            this.__get(url, "", callBack);
+        }
+        this.__getCallBack = function (result) {
+            try {
+                var r = result;
+                $this.setUserStatus("Ready...");
+                $this.__userCallBack(r);
+            }
+            catch (ex) {
+                $this.__trace($this.__stringFormat("Error calling callback:{0}", ex));
+                throw ex;
+            }
+        }
+        this.__trace = function (m) {
+
+            if (this._traceOn)
+                console.log("[info]" + m.toString());
+            return m;
+        }
+        this.showError = function (m) {
+            this.__traceError(m);
+            alert("[error]" + m);
+        }
+        this.__traceError = function (m) {
+
+            if (this._traceOn)
+                console.log("[error]" + m.toString());
+            return m;
+        }
+        this.setUserStatus = function (msg) {
+
+            var userStatus = $("#userStatus");
+            if (sys.isUndefined(msg))
+                msg = "";
+            userStatus.text(msg);
+        }
+        this.getData = function (period /* lastDay, last10Minutes, lastHour, Current*/, clearData) {
+            
+            this._lastPeriod = period;
+            this.__getData(this.TEMP_SENSOR_DEVICE_ID, period, clearData);
+        }        
+        this.__getData = function (sensorId, period /* lastDay, last10Minutes, lastHour, Current */, clearData) {
+            var action = clearData ? "clearData" : null;
+            this.busy(true);
+            var customStartTime = moment(); // Re init as now
+            switch(period) {
+                case "last24Hours"   : customStartTime = customStartTime.subtract(24, 'hours');  break;
+                case "lastHour"      : customStartTime = customStartTime.subtract(1, 'hours');   break;
+                case "last10Minutes" : customStartTime = customStartTime.subtract(10, 'minutes');break;
+                case "current"       : customStartTime = this.StartTime; /* get the newest from the current stream */ break;
+                default              : this.__traceError(this.__stringFormat("Invalid period:{0} for method getData()", period)); break;
+            }
+            this.StartTime = customStartTime;
+            this.__callNusbioRestApi(this.__stringFormat("/GetData?startTime={0}&lastMaxSample={1}&deviceId={2}&action={3}", 
+                encodeURIComponent(moment(customStartTime).format()),
+                $("#lastMaxSample").val(), sensorId, action
+            ));
+        }
+        this.getDeviceState = function (callBack, hideRestCall) {
+
+            var url = "/nusbio/state";
+            if (hideRestCall)
+                url = "/nusbio/stateh";
+            this.__callNusbioRestApi(url, callBack);
+        }
+        this.__stringFormat = function () {
+            ///	<summary>
+            ///Format the string passed as first argument based on the list of following arguments referenced in the format template&#10;
+            ///with the synatx {index}
+            ///Sample:&#10;
+            ///     var r = "LastName:{0}, Age:{1}".format("TORRES", 45);&#10;
+            ///	</summary>
+            ///	<param name="tpl" type="string">value</param>
+            ///	<param name="p1" type="object">value</param>
+            for (var i = 1; i < arguments.length; i++)
+                arguments[0] = arguments[0].replace(new RegExp('\\{' + (i - 1) + '\\}', 'gm'), arguments[i]);
+            return arguments[0];
+        }
+        this.__init__();
+    }
+
+    function updateTime() {
+
+        var out = $("#out");
+        out.text("" + (new Date()));
+        //nusbio.getData("last10Minutes");
+        //setTimeout(updateTime, 1000);
+    }
+
+    var nusbio = null;
+
+    function init() {
+        nusbio = new NusbioClass(HOST, HOST_PORT, Nusbio__callBack);
+        setTimeout(updateTime, 1000);
+        //nusbio.disableRefreshButton();
+    }
+    setTimeout(init, 100);
+</script>
